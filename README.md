@@ -7,6 +7,10 @@
 This is the official code repository for **"From High-Dimensional Chaos to Clear Rules: Post-Hoc Explanations Driven by Geometric Modeling"**. The implementation includes some practical code, where `imageinterpretable.py` is a simple script for image classification (based on ResNet). It can be used to demonstrate the local and global interpretability of the designed method.
 
 ---
+## Tips:
+      Dataset1 Dowloaded for Imagetest: https://www.kaggle.com/datasets/alessiocorrado99/animals10
+      Dataset2 Dowloaded for Iamgetest: https://www.kaggle.com/datasets/sharansmenon/animals141
+---
 
 ## Official Code Repository
 
@@ -41,7 +45,5 @@ To run the code and generate interpretable rules:
       Fuzzy Rules : Saved in fuzzy_rules.txt.
       Visualization : Rule visualization saved as rule_visualization.png.
 
-4. **Tips**:
-      Dataset1 Dowloaded for Imagetest: https://www.kaggle.com/datasets/alessiocorrado99/animals10
-      Dataset2 Dowloaded for Iamgetest: https://www.kaggle.com/datasets/sharansmenon/animals141
+
 
