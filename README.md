@@ -41,7 +41,7 @@ To run the code and generate interpretable rules:
       Fuzzy Rules : Saved in fuzzy_rules.txt.
       Visualization : Rule visualization saved as rule_visualization.png.
 
-### Tips
-Dataset1 Dowloaded for Imagetest: https://www.kaggle.com/datasets/alessiocorrado99/animals10
-Dataset2 Dowloaded for Iamgetest: https://www.kaggle.com/datasets/sharansmenon/animals141
+4. **Tips**:
+      Dataset1 Dowloaded for Imagetest: https://www.kaggle.com/datasets/alessiocorrado99/animals10
+      Dataset2 Dowloaded for Iamgetest: https://www.kaggle.com/datasets/sharansmenon/animals141
 
