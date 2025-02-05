@@ -35,10 +35,13 @@ To run the code and generate interpretable rules:
    ```bash
    python imageinterpretable.py
 
-3. **Run the Scripts**:
+3. **Output**:
   ```bash
-   Output :
-   Heatmaps : Saved in the projected_heatmaps folder.
-   Fuzzy Rules : Saved in fuzzy_rules.txt.
-   Visualization : Rule visualization saved as rule_visualization.png.
+      Heatmaps : Saved in the projected_heatmaps folder.
+      Fuzzy Rules : Saved in fuzzy_rules.txt.
+      Visualization : Rule visualization saved as rule_visualization.png.
+
+### Tips
+Dataset1 Dowloaded for Imagetest: https://www.kaggle.com/datasets/alessiocorrado99/animals10
+Dataset2 Dowloaded for Iamgetest: https://www.kaggle.com/datasets/sharansmenon/animals141
 
