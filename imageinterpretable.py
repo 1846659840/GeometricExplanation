@@ -152,62 +152,56 @@ class GeometricExplainer:
 
     def _generate_local_spatial_heatmap(self, img_tensor):
         """
-        利用最後卷積層的特徵圖，對每個空間位置生成局部擾動，
-        並計算該位置的有效擾動比例（valid_ratio），最終構成一個
-        H×W 的指標圖。然後將該指標圖上採樣到原始圖像尺寸，
-        與原圖融合後保存到 projected_heatmaps 文件夾中。
+        基於遮擋法的局部解釋熱力圖生成：
+        1. 對原始圖像進行滑動窗口遮擋，判斷不同區域的影響程度；
+        2. 生成熱力圖後上採樣至原圖尺寸，並疊加顯示。
         """
+        # 設置遮擋參數
+        patch_size = 32  # 遮擋窗口大小
+        stride = 16      # 滑動步長
+        baseline = torch.zeros_like(img_tensor)  # 基線（歸一化後的均值爲0）
+
+        # 獲取預測類別
         with torch.no_grad():
-            feat_map = feature_extractor(img_tensor)  # shape: (1, C, H, W)；例如 (1,512,7,7)
-        _, C, H, W = feat_map.shape
-        valid_ratio_map = np.zeros((H, W))
+            output = model(img_tensor)
+            orig_prob = F.softmax(output, dim=1).max().item()
+            orig_class = output.argmax().item()
 
-        # 對每個空間位置進行擾動驗證
-        for i in range(H):
-            for j in range(W):
-                base_feat = feat_map[0, :, i, j]      # (C,)
-                base_feat = base_feat.unsqueeze(0)      # (1, C)
-                # 該位置的局部預測
-                local_pred = model.fc(base_feat).argmax().item()
-                # 使用較小的擾動幅度
-                perturb_feats = self._manifold_perturbation(base_feat, scale=0.05)  # (PERTURB_SIZE, C)
-                valid_mask = []
-                for pf in perturb_feats:
-                    pf = pf.to(img_tensor.device)
-                    pred = model.fc(pf.unsqueeze(0)).argmax().item()
-                    valid_mask.append(pred == local_pred)
-                valid_ratio = np.mean(valid_mask)
-                valid_ratio_map[i, j] = valid_ratio
+        input_tensor = img_tensor.squeeze(0).cpu()  # (3, 224,224)
+        H, W = input_tensor.shape[1], input_tensor.shape[2]
+        heatmap = np.zeros((H, W))
+        count_map = np.zeros((H, W))
 
-        # 若 valid_ratio 的取值範圍較窄，進行歸一化
-        if valid_ratio_map.max() - valid_ratio_map.min() > 1e-6:
-            valid_ratio_map = (valid_ratio_map - valid_ratio_map.min()) / (valid_ratio_map.max() - valid_ratio_map.min())
+        # 滑動窗口遮擋
+        for i in range(0, H - patch_size + 1, stride):
+            for j in range(0, W - patch_size + 1, stride):
+                occluded = img_tensor.clone()
+                occluded[:, :, i:i+patch_size, j:j+patch_size] = baseline[:, :, i:i+patch_size, j:j+patch_size]
+                with torch.no_grad():
+                    prob = F.softmax(model(occluded), dim=1)[0, orig_class].item()
+                diff = orig_prob - prob  # 影響程度
+                heatmap[i:i+patch_size, j:j+patch_size] += diff
+                count_map[i:i+patch_size, j:j+patch_size] += 1
 
-        # 將 H×W 的 valid_ratio_map 上採樣到原始圖像尺寸（224×224）
-        valid_ratio_tensor = torch.tensor(valid_ratio_map, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
-        upsampled = F.interpolate(valid_ratio_tensor, size=(224,224), mode='bilinear', align_corners=False)
-        upsampled = upsampled.squeeze().cpu().numpy()
+        # 歸一化處理
+        heatmap = np.divide(heatmap, count_map + 1e-5)
+        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-5)
 
-        # 利用 matplotlib 的 colormap 轉換成彩色熱力圖（RGB）
-        cmap = plt.get_cmap('jet')
-        heatmap_color = cmap(upsampled)[:, :, :3]  # (224,224,3)
+        # 反歸一化原圖
+        img_np = denormalize(img_tensor.squeeze()).cpu().numpy()
+        img_np = np.transpose(img_np, (1, 2, 0))
+        img_np = np.clip(img_np, 0, 1)
 
-        # 反歸一化原圖（shape: 3×224×224 --> 224×224×3）
-        orig_img = denormalize(img_tensor.squeeze()).cpu().numpy()
-        orig_img = np.transpose(orig_img, (1,2,0))
-        orig_img = np.clip(orig_img, 0, 1)
+        # 生成熱力圖疊加圖像
+        plt.figure(figsize=(8, 8))
+        plt.imshow(img_np)
+        plt.imshow(heatmap, cmap='jet', alpha=0.4)
+        plt.axis('off')
 
-        # 融合原圖與熱力圖：這裡用 alpha 混合
-        alpha = 0.5
-        overlay = (1 - alpha) * orig_img + alpha * heatmap_color
-
-        # 保存融合結果到 projected_heatmaps 文件夾
+        # 保存結果
         if not os.path.exists("projected_heatmaps"):
             os.makedirs("projected_heatmaps")
-        plt.figure(figsize=(6,6))
-        plt.imshow(overlay)
-        plt.axis('off')
-        filename = os.path.join("projected_heatmaps", f"projected_heatmap_{id(img_tensor)}.png")
+        filename = os.path.join("projected_heatmaps", f"heatmap_{id(img_tensor)}.png")
         plt.savefig(filename, bbox_inches='tight')
         plt.close()
 
@@ -299,3 +293,325 @@ if __name__ == "__main__":
     plt.savefig('rule_visualization.png', dpi=120)
 
     print("全局模糊規則生成完畢，各圖片的投影熱力圖保存在 projected_heatmaps 文件夾中。")
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import models, transforms
+from torch.utils.data import DataLoader, Dataset
+import numpy as np
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+from PIL import Image
+import os
+
+# ========================== 配置參數 ==========================
+DATA_PATH = "/content/dog"  # 狗狗圖片文件夾路徑
+CLASS_INDEX = 258  # ImageNet中對應狗的類別索引（僅作參考）
+NUM_SAMPLES = 10  # 全局解釋樣本數（可根據需要調整）
+PERTURB_SIZE = 500  # 單張圖片擾動生成數量
+PCA_COMPONENTS = 50  # 流形擾動主成分數量
+DELTA = 0.12  # 模糊軟化參數
+
+# 判斷設備
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ====================== 圖像預處理與模型加載 ======================
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+def denormalize(tensor):
+    """反歸一化，用於顯示原圖"""
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(tensor.device)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(tensor.device)
+    return tensor * std + mean
+
+class DogDataset(Dataset):
+    def __init__(self, root_dir):
+        self.image_files = [os.path.join(root_dir, f)
+                            for f in os.listdir(root_dir)
+                            if f.lower().endswith(('png', 'jpg', 'jpeg'))]
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.image_files[idx]).convert('RGB')
+        return transform(img)
+
+# 加載 ResNet-18 預訓練模型，並將模型調整為評估模式
+model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+model = model.to(device)
+model.eval()
+
+# feature_extractor 用於提取卷積特徵（不包括最後的全連接層）
+feature_extractor = nn.Sequential(*list(model.children())[:-1])
+
+# fc_input_adapter 將全局池化後的特徵展平成 1D 向量（用於全局超立方體生成）
+fc_input_adapter = nn.Sequential(
+    nn.AdaptiveAvgPool2d((1, 1)),
+    nn.Flatten()
+)
+
+# ========================== 幾何解釋器核心 ==========================
+class GeometricExplainer:
+    def __init__(self, pca_n=PCA_COMPONENTS):
+        self.pca = PCA(n_components=pca_n)  # 用於流形擾動的主成分模型
+        self._init_pseudo_pid_params()  # 初始化 PID 控制器參數
+
+    def _init_pseudo_pid_params(self):
+        # PID 增益參數（模仿控制理論中的非線性調整）
+        self.Kp0 = 0.8
+        self.Ki0 = 0.15
+        self.Kd0 = 0.2
+        self.lambda_gain = 0.5
+
+    def _manifold_perturbation(self, base_feat, scale=0.1):
+        """
+        流形感知擾動生成（TSPG 方法）：
+        1. 構造虛擬局部流形（通過添加小噪聲生成鄰域樣本）；
+        2. 使用 PCA 提取主要方向，再在切空間方向生成擾動。
+        輸入 base_feat 的 shape 為 (1, D)，返回擾動樣本 (PERTURB_SIZE, D)。
+        scale 參數控制擾動幅度，可針對不同應用進行調整（例如空間位置採用較小的擾動）。
+        """
+        # 構造虛擬鄰域
+        pseudo_neighbors = base_feat + 0.05 * torch.randn(PCA_COMPONENTS * 2, *base_feat.shape, device=base_feat.device)
+        self.pca.fit(pseudo_neighbors.flatten(1).cpu().numpy())
+        # 提取 PCA 主成分向量（shape: (PCA_COMPONENTS, D)）
+        pc_vec = torch.tensor(self.pca.components_).float().to(base_feat.device)
+        coeffs = torch.randn(PERTURB_SIZE, PCA_COMPONENTS, device=base_feat.device)
+        perturbation = coeffs @ pc_vec  # (PERTURB_SIZE, D)
+        return base_feat.flatten(1) + scale * perturbation  # (PERTURB_SIZE, D)
+
+    def _save_embedding_heatmap(self, valid_feats, img_tensor):
+        """
+        生成全局 embedding 熱力圖：將有效擾動樣本降到 2D，利用 hexbin 繪製密度圖，
+        並保存到 embedding_heatmaps 文件夾中（該圖僅展示特徵空間分佈，不與原圖投影）。
+        """
+        valid_feats_np = valid_feats.cpu().numpy()  # (N, D)
+        pca_2d = PCA(n_components=2)
+        embedded = pca_2d.fit_transform(valid_feats_np)  # (N, 2)
+
+        plt.figure(figsize=(6, 6))
+        hb = plt.hexbin(embedded[:, 0], embedded[:, 1], gridsize=30, cmap='jet', mincnt=1)
+        plt.colorbar(hb, label='Count')
+        plt.title("Local Hypercube Embedding Heatmap")
+        plt.xlabel("PC1")
+        plt.ylabel("PC2")
+        if not os.path.exists("embedding_heatmaps"):
+            os.makedirs("embedding_heatmaps")
+        filename = os.path.join("embedding_heatmaps", f"embedding_heatmap_{id(img_tensor)}.png")
+        plt.savefig(filename, bbox_inches='tight')
+        plt.close()
+
+    def _generate_local_hypercube(self, img_tensor):
+        """
+        針對單張圖片生成全局解釋超立方體：
+        1. 利用 feature_extractor 提取全圖特徵，並通過全局池化適配全連接層；
+        2. 根據全局特徵生成擾動，並篩選出預測與原圖一致的有效擾動；
+        3. 對有效擾動做 PCA embedding（僅生成一份 hexbin 圖，非投影到原圖）；
+        4. 返回局部超立方體（各維度的最小值和最大值）及有效比例。
+        """
+        with torch.no_grad():
+            orig_feat = feature_extractor(img_tensor)  # (1, C, 7, 7)
+            orig_feat_fc = fc_input_adapter(orig_feat)  # (1, D)
+            orig_pred = model(img_tensor).argmax().item()  # 全局預測
+            perturb_feats = self._manifold_perturbation(orig_feat_fc, scale=0.1)  # (PERTURB_SIZE, D)
+            valid_mask = []
+            for pf in perturb_feats:
+                pf = pf.to(img_tensor.device)
+                pred = model.fc(pf.unsqueeze(0)).argmax().item()
+                valid_mask.append(pred == orig_pred)
+            valid_mask = torch.tensor(valid_mask, dtype=torch.bool, device=perturb_feats.device)
+            valid_feats = perturb_feats[valid_mask]
+            if len(valid_feats) == 0:
+                return None
+            # 保存全局 embedding 熱力圖（展示擾動在 PCA 降維後的分佈情況）
+            self._save_embedding_heatmap(valid_feats, img_tensor)
+            lower = valid_feats.min(dim=0)[0].cpu().numpy()
+            upper = valid_feats.max(dim=0)[0].cpu().numpy()
+            return {"lower": lower, "upper": upper, "valid_ratio": len(valid_feats) / PERTURB_SIZE}
+
+    def _generate_local_spatial_heatmap(self, img_tensor):
+        """
+        基於遮擋法的局部解釋熱力圖生成：
+        1. 對原始圖像進行滑動窗口遮擋，判斷不同區域的影響程度；
+        2. 生成熱力圖後上採樣至原圖尺寸，並疊加顯示。
+        """
+        # 設置遮擋參數
+        patch_size = 32  # 遮擋窗口大小
+        stride = 16      # 滑動步長
+        baseline = torch.zeros_like(img_tensor)  # 基線（歸一化後的均值爲0）
+
+        # 獲取預測類別
+        with torch.no_grad():
+            output = model(img_tensor)
+            orig_prob = F.softmax(output, dim=1).max().item()
+            orig_class = output.argmax().item()
+
+        input_tensor = img_tensor.squeeze(0).cpu()  # (3, 224,224)
+        H, W = input_tensor.shape[1], input_tensor.shape[2]
+        heatmap = np.zeros((H, W))
+        count_map = np.zeros((H, W))
+
+        # 滑動窗口遮擋
+        for i in range(0, H - patch_size + 1, stride):
+            for j in range(0, W - patch_size + 1, stride):
+                occluded = img_tensor.clone()
+                occluded[:, :, i:i+patch_size, j:j+patch_size] = baseline[:, :, i:i+patch_size, j:j+patch_size]
+                with torch.no_grad():
+                    prob = F.softmax(model(occluded), dim=1)[0, orig_class].item()
+                diff = orig_prob - prob  # 影響程度
+                heatmap[i:i+patch_size, j:j+patch_size] += diff
+                count_map[i:i+patch_size, j:j+patch_size] += 1
+
+        # 歸一化處理
+        heatmap = np.divide(heatmap, count_map + 1e-5)
+        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-5)
+
+        # 反歸一化原圖
+        img_np = denormalize(img_tensor.squeeze()).cpu().numpy()
+        img_np = np.transpose(img_np, (1, 2, 0))
+        img_np = np.clip(img_np, 0, 1)
+
+        # 生成熱力圖疊加圖像
+        plt.figure(figsize=(8, 8))
+        plt.imshow(img_np)
+        plt.imshow(heatmap, cmap='jet', alpha=0.4)
+        plt.axis('off')
+
+        # 保存結果
+        if not os.path.exists("projected_heatmaps"):
+            os.makedirs("projected_heatmaps")
+        filename = os.path.join("projected_heatmaps", f"heatmap_{id(img_tensor)}.png")
+        plt.savefig(filename, bbox_inches='tight')
+        plt.close()
+
+    def _pid_fusion(self, hypercubes, max_iter=20, eps=1e-4):
+        """
+        利用 PID 控制器對所有局部超立方體進行全局融合，得到全局模糊規則。
+        """
+        X = np.array([np.concatenate([h['lower'], h['upper']]) for h in hypercubes])
+        q = X.mean(axis=0)
+        integral = np.zeros_like(q)
+        prev_error = np.zeros_like(q)
+        for t in range(max_iter):
+            distances = np.linalg.norm(X - q, axis=1)
+            weights = 1 / (1 + 0.5 * (distances ** 2))
+            weights /= weights.sum()
+            error = (weights[:, None] * (X - q)).sum(axis=0)
+            sigma_e = np.std(X - q, axis=0).mean()
+            Kp = self.Kp0 / (1 + self.lambda_gain * sigma_e)
+            Ki = self.Ki0 / (1 + self.lambda_gain * sigma_e)
+            Kd = self.Kd0 / (1 + self.lambda_gain * sigma_e)
+            integral += error
+            derivative = error - prev_error
+            q_update = Kp * np.tanh(error) + Ki * integral + Kd * np.tanh(derivative)
+            q_new = q + q_update
+            if np.linalg.norm(q_new - q) < eps:
+                break
+            q = q_new
+            prev_error = error
+        D = q.shape[0] // 2
+        global_lower = q[:D]
+        global_upper = q[D:]
+        return global_lower, global_upper
+
+    def generate_rules(self, data_loader):
+        """
+        對數據集中所有圖片生成局部超立方體，並融合得到全局模糊規則。
+        同時，對每張圖片生成投影到原圖上的局部熱力圖。
+        返回軟化後的全局上下界以及有效超立方體數量。
+        """
+        hypercubes = []
+        for img in data_loader:
+            img = img.to(device)
+            # 全局超立方體（用於全局規則融合）
+            hc = self._generate_local_hypercube(img)
+            if hc is not None:
+                hypercubes.append(hc)
+            # 局部空間熱力圖（投影到原圖上）
+            self._generate_local_spatial_heatmap(img)
+        if len(hypercubes) == 0:
+            raise ValueError("沒有生成有效的局部超立方體！")
+        gl, gu = self._pid_fusion(hypercubes)
+        soft_lower = gl - DELTA * (gu - gl)
+        soft_upper = gu + DELTA * (gu - gl)
+        return soft_lower, soft_upper, len(hypercubes)
+
+
+# ====================== 添加规则生成函数 ======================
+def generate_if_then_rules(soft_lower, soft_upper, selected_dims, class_name="Basset Hound"):
+    """
+    将模糊规则转换为可读的if-then格式
+    参数:
+    soft_lower: 模糊规则下界
+    soft_upper: 模糊规则上界
+    selected_dims: 选中的关键特征维度
+    class_name: 目标类别名称
+    """
+    conditions = []
+    for i in selected_dims:
+        condition = f"Feature_{i} ∈ [{soft_lower[i]:.3f}, {soft_upper[i]:.3f}]"
+        conditions.append(condition)
+    rule_structure = f"IF {' AND '.join(conditions)} THEN Class == {class_name}"
+    return rule_structure
+
+
+# ====================== 修改主执行流程 ======================
+if __name__ == "__main__":
+    # 1. 加載數據集
+    dataset = DogDataset(DATA_PATH)
+    loader = DataLoader(dataset, batch_size=1, shuffle=True)
+
+    # 2. 初始化解釋器並生成全局模糊規則，同時為每張圖片生成投影熱力圖
+    explainer = GeometricExplainer()
+    soft_lower, soft_upper, valid_num = explainer.generate_rules(loader)
+
+    # 3. 可視化關鍵通道的模糊規則（選取變化最大的5個通道）
+    plt.figure(figsize=(10, 6))
+    selected_dims = np.argsort(soft_upper - soft_lower)[-5:][::-1]  # 取變化幅度最大的前5個特徵
+    for i in selected_dims:
+        xmin = soft_lower[i] - 0.1 * (soft_upper[i] - soft_lower[i])
+        xmax = soft_upper[i] + 0.1 * (soft_upper[i] - soft_lower[i])
+        x = np.linspace(xmin, xmax, 200)
+        y = np.piecewise(x, [
+            x < soft_lower[i],
+            (x >= soft_lower[i]) & (x <= soft_upper[i]),
+            x > soft_upper[i]
+        ], [0, 1, 0])
+        plt.plot(x, y, lw=2.5, label=f'Feature {i}')
+    plt.xlabel('Feature Activation', fontsize=12)
+    plt.ylabel('Membership Degree', fontsize=12)
+    plt.title(f"Key Feature Fuzzy Rules for Basset Hound")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('rule_visualization.png', dpi=120)
+
+    # 4. 生成可解释的if-then规则
+    class_name = f"Dog (ImageNet Class {CLASS_INDEX})"
+    rule = generate_if_then_rules(soft_lower, soft_upper, selected_dims, class_name)
+
+    # 保存规则到文件
+    with open("fuzzy_rules.txt", "w") as f:
+        f.write("Global Fuzzy Rules for Dog Classification:\n")
+        f.write("=" * 50 + "\n")
+        f.write(rule + "\n\n")
+        f.write("Feature Details:\n")
+        for i in selected_dims:
+            f.write(f"Feature_{i}: Range [{soft_lower[i]:.4f}, {soft_upper[i]:.4f}]\n")
+
+    # 控制台输出
+    print("\n生成的模糊规则:")
+    print("=" * 50)
+    print(rule)
+    print("\n关键特征范围:")
+    for i in selected_dims:
+        print(f"Feature {i}: [{soft_lower[i]:.4f}, {soft_upper[i]:.4f}]")
+    print("规则已保存至 fuzzy_rules.txt")
+    print("\n全局模糊規則生成完畢，各圖片的投影熱力圖保存在 projected_heatmaps 文件夾中。")
